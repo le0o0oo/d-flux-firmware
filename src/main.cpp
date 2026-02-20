@@ -1,13 +1,20 @@
 #include "NimBLEClient.h"
 #include <Adafruit_SCD30.h>
 #include <Arduino.h>
+#include <ESP32Servo.h>
 #include <NimBLEConnInfo.h>
 #include <NimBLEDevice.h>
 
 #define LED_PIN 2
+#define SERVO_PIN 12
 
 const int NOT_CONNECTED_FLASH_INTERVAL = 500;
 int lastFlashTime = 0;
+
+int servoPos = 0;
+int servoStep = 2; // Speed of rotation
+unsigned long lastServoMove = 0;
+const int SERVO_INTERVAL = 20; // ms between steps
 
 #define SERVICE_UUID "DB594551-159C-4DA8-B59E-1C98587348E1"
 #define CHARACTERISTIC_RX_UUID                                                 \
@@ -37,6 +44,7 @@ const std::string manufacturerData = []() {
 
 Adafruit_SCD30 scd30;
 NimBLECharacteristic *pTxCharacteristic;
+Servo servo;
 
 bool deviceConnected = false;
 bool acquire = false;
@@ -100,6 +108,7 @@ void setup() {
   Serial.begin(115200);
 
   pinMode(LED_PIN, OUTPUT);
+  servo.attach(SERVO_PIN);
 
   if (!scd30.begin()) {
     Serial.println("Failed to find SCD30 chip");
@@ -157,8 +166,21 @@ void loop() {
     digitalWrite(LED_PIN, LOW);
   }
 
-  if (deviceConnected && acquire && scd30.dataReady()) {
-    if (scd30.read()) {
+  if (deviceConnected && acquire) {
+
+    if (millis() - lastServoMove > SERVO_INTERVAL) {
+      lastServoMove = millis();
+
+      servoPos += servoStep;
+
+      if (servoPos >= 180 || servoPos <= 0) {
+        servoStep = -servoStep; // reverse direction
+      }
+
+      servo.write(servoPos);
+    }
+
+    if (scd30.dataReady() && scd30.read()) {
       float temp = scd30.temperature;
       float hum = scd30.relative_humidity;
       float co2 = scd30.CO2;
