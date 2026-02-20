@@ -41,12 +41,16 @@ NimBLECharacteristic *pTxCharacteristic;
 bool deviceConnected = false;
 bool acquire = false;
 
+const bool DEBUG = true;
+
 void sendCommand(String cmd, String payload) {
   if (!deviceConnected)
     return;
 
   pTxCharacteristic->setValue((cmd + ' ' + payload + '\n').c_str());
   pTxCharacteristic->notify();
+  if (DEBUG)
+    Serial.println("-> TX: " + cmd + " " + payload);
 }
 void commandHandler(String cmd, String payload) {
   if (cmd == "START_ACQUISITION") {
@@ -66,6 +70,8 @@ class ClientCallbacks : public NimBLECharacteristicCallbacks {
     std::string rxValue = pCharacteristic->getValue();
     String cmd = String(rxValue.c_str());
     cmd.trim(); // Remove whitespace
+    if (DEBUG)
+      Serial.println("<- RX: " + cmd);
 
     commandHandler(cmd, String(rxValue.c_str()));
   }
@@ -76,6 +82,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     deviceConnected = true;
     digitalWrite(LED_PIN, LOW);
     Serial.println("Client Connected");
+
+    pServer->updateConnParams(connInfo.getConnHandle(), 12, 24, 0, 400);
   };
 
   void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo,
