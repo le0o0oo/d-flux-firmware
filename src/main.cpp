@@ -1,26 +1,29 @@
 #include "NimBLEClient.h"
+#include "NimBLEServer.h"
+#include "esp32-hal-ledc.h"
 #include <Adafruit_SCD30.h>
 #include <Arduino.h>
-#include <ESP32Servo.h>
 #include <NimBLEConnInfo.h>
 #include <NimBLEDevice.h>
 
 #define LED_PIN 2
 #define SERVO_PIN 12
 
-const int NOT_CONNECTED_FLASH_INTERVAL = 500;
-int lastFlashTime = 0;
-
-int servoPos = 0;
-int servoStep = 2; // Speed of rotation
-unsigned long lastServoMove = 0;
-const int SERVO_INTERVAL = 20; // ms between steps
-
 #define SERVICE_UUID "DB594551-159C-4DA8-B59E-1C98587348E1"
 #define CHARACTERISTIC_RX_UUID                                                 \
   "7B6B12CD-CA54-46A6-B3F4-3A848A3ED00B" // App writes commands here
 #define CHARACTERISTIC_TX_UUID                                                 \
   "907BAC5D-92ED-4D90-905E-A3A7B9899F21" // notifies sensor data here
+
+const int NOT_CONNECTED_FLASH_INTERVAL = 500;
+int lastFlashTime = 0;
+
+// Servo
+const int pwmChannel = 0;
+const int pwmFreq = 50;       // 50 Hz for servo
+const int pwmResolution = 16; // 16-bit resolution
+
+uint16_t currentConnHandle = 0;
 
 const char *deviceName = "ESP32_SCD30";
 // Metadata to broadcast
@@ -44,13 +47,19 @@ const std::string manufacturerData = []() {
 
 Adafruit_SCD30 scd30;
 NimBLECharacteristic *pTxCharacteristic;
-Servo servo;
+
+NimBLEServer *pServer = NULL;
 
 bool deviceConnected = false;
 bool acquire = false;
 
 const bool DEBUG = true;
 
+void startSpin() {
+  ledcAttachPin(SERVO_PIN, pwmChannel);
+  ledcWrite(pwmChannel, 4500);
+}
+void stopSpin() { ledcDetachPin(SERVO_PIN); }
 void sendCommand(String cmd, String payload) {
   if (!deviceConnected)
     return;
@@ -62,26 +71,40 @@ void sendCommand(String cmd, String payload) {
 }
 void commandHandler(String cmd, String payload) {
   if (cmd == "START_ACQUISITION") {
+    startSpin();
     acquire = true;
   } else if (cmd == "STOP_ACQUISITION") {
+    stopSpin();
     acquire = false;
   } else if (cmd == "WHOIS") {
     sendCommand("WHOIS", String(manufacturerText.c_str()));
   } else if (cmd == "GET_ACQUISITION_STATE") {
     sendCommand("ACQUISITION_STATE", String(acquire));
+  } else if (cmd == "DISCONNECT") {
+    if (deviceConnected)
+      pServer->disconnect(currentConnHandle);
   }
 }
-
 class ClientCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *pCharacteristic,
                NimBLEConnInfo &connInfo) {
     std::string rxValue = pCharacteristic->getValue();
-    String cmd = String(rxValue.c_str());
-    cmd.trim(); // Remove whitespace
+    String value = String(rxValue.c_str());
+    value.trim(); // Remove whitespace
     if (DEBUG)
-      Serial.println("<- RX: " + cmd);
+      Serial.println("<- RX: " + value);
 
-    commandHandler(cmd, String(rxValue.c_str()));
+    int separator = value.indexOf(' ');
+    String cmd, payload;
+
+    if (separator != -1) {
+      cmd = value.substring(0, separator);
+      payload = value.substring(separator + 1);
+    } else {
+      cmd = value;
+    }
+
+    commandHandler(cmd, payload);
   }
 };
 
@@ -89,9 +112,10 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo) {
     deviceConnected = true;
     digitalWrite(LED_PIN, LOW);
+    currentConnHandle = connInfo.getConnHandle();
     Serial.println("Client Connected");
 
-    pServer->updateConnParams(connInfo.getConnHandle(), 12, 24, 0, 400);
+    pServer->updateConnParams(currentConnHandle, 12, 24, 0, 400);
   };
 
   void onDisconnect(NimBLEServer *pServer, NimBLEConnInfo &connInfo,
@@ -108,7 +132,7 @@ void setup() {
   Serial.begin(115200);
 
   pinMode(LED_PIN, OUTPUT);
-  servo.attach(SERVO_PIN);
+  ledcSetup(pwmChannel, pwmFreq, pwmResolution);
 
   if (!scd30.begin()) {
     Serial.println("Failed to find SCD30 chip");
@@ -128,7 +152,7 @@ void setup() {
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
   NimBLEDevice::deleteAllBonds();
 
-  NimBLEServer *pServer = NimBLEDevice::createServer();
+  pServer = NimBLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
   NimBLEService *pService = pServer->createService(SERVICE_UUID);
@@ -167,31 +191,20 @@ void loop() {
   }
 
   if (deviceConnected && acquire) {
+    if (scd30.dataReady()) {
+      if (scd30.read()) {
+        float temp = scd30.temperature;
+        float hum = scd30.relative_humidity;
+        float co2 = scd30.CO2;
 
-    if (millis() - lastServoMove > SERVO_INTERVAL) {
-      lastServoMove = millis();
+        String payload = "CO2=" + String(co2, 2) + ";TMP=" + String(temp, 2) +
+                         ";HUM=" + String(hum, 2);
 
-      servoPos += servoStep;
+        sendCommand("DATA", payload);
 
-      if (servoPos >= 180 || servoPos <= 0) {
-        servoStep = -servoStep; // reverse direction
+      } else {
+        Serial.println("Error reading sensor");
       }
-
-      servo.write(servoPos);
-    }
-
-    if (scd30.dataReady() && scd30.read()) {
-      float temp = scd30.temperature;
-      float hum = scd30.relative_humidity;
-      float co2 = scd30.CO2;
-
-      String payload = "CO2=" + String(co2, 2) + ";TMP=" + String(temp, 2) +
-                       ";HUM=" + String(hum, 2);
-
-      sendCommand("DATA", payload);
-
-    } else {
-      Serial.println("Error reading sensor");
     }
   }
 
