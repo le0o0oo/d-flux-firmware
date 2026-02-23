@@ -1,10 +1,12 @@
 #include "NimBLEClient.h"
 #include "NimBLEServer.h"
+#include "WString.h"
 #include "esp32-hal-ledc.h"
 #include <Adafruit_SCD30.h>
 #include <Arduino.h>
 #include <NimBLEConnInfo.h>
 #include <NimBLEDevice.h>
+#include <Preferences.h>
 
 #define LED_PIN 2
 #define SERVO_PIN 12
@@ -15,8 +17,18 @@
 #define CHARACTERISTIC_TX_UUID                                                 \
   "907BAC5D-92ED-4D90-905E-A3A7B9899F21" // notifies sensor data here
 
+#define SETTING_MODE_READ 0
+#define SETTING_MODE_WRITE 1
+
 const int NOT_CONNECTED_FLASH_INTERVAL = 500;
 int lastFlashTime = 0;
+
+struct ConfigItem {
+  const char *key;
+  float defaultValue;
+};
+
+ConfigItem settingsKeys[] = {{"offset", 0.0}, {"multiplier", 1.0}};
 
 // Servo
 const int pwmChannel = 0;
@@ -30,7 +42,7 @@ const char *deviceName = "ESP32_SCD30";
 const char *DEVICE_ID = "ESP32_01";
 const char *DEVICE_ORG = "INGV";
 const char *DEVICE_FW = "1.0";
-// Use a real Bluetooth SIG Company Identifier when available.
+
 const uint16_t COMPANY_ID = 0xB71E;
 
 const std::string manufacturerText =
@@ -47,6 +59,7 @@ const std::string manufacturerData = []() {
 
 Adafruit_SCD30 scd30;
 NimBLECharacteristic *pTxCharacteristic;
+Preferences preferences;
 
 NimBLEServer *pServer = NULL;
 
@@ -69,6 +82,54 @@ void sendCommand(String cmd, String payload) {
   if (DEBUG)
     Serial.println("-> TX: " + cmd + " " + payload);
 }
+
+void settingsParser(String payload, int mode) {
+  if (mode == SETTING_MODE_READ) {
+    String response = "";
+    for (auto &settingKey : settingsKeys) {
+      float val = preferences.getFloat(settingKey.key, settingKey.defaultValue);
+      response += String(settingKey.key) + "=" + String(val) + ";";
+    }
+    sendCommand("SETTINGS", response);
+
+  } else if (mode == SETTING_MODE_WRITE) {
+    bool updated = false;
+
+    for (const auto &item : settingsKeys) {
+      String searchToken = String(item.key) + "=";
+
+      int keyIndex = payload.indexOf(searchToken);
+
+      if (keyIndex != -1) {
+        int valueStart = keyIndex + searchToken.length();
+
+        int valueEnd = payload.indexOf(';', valueStart);
+
+        if (valueEnd == -1) {
+          valueEnd = payload.length();
+        }
+
+        String valueStr = payload.substring(valueStart, valueEnd);
+        float newValue = valueStr.toFloat();
+
+        preferences.putFloat(item.key, newValue);
+        updated = true;
+
+        if (DEBUG) {
+          Serial.print("Updated [");
+          Serial.print(item.key);
+          Serial.print("] to: ");
+          Serial.println(newValue);
+        }
+      }
+    }
+
+    if (updated) {
+      settingsParser("", SETTING_MODE_READ);
+    }
+  }
+}
+
 void commandHandler(String cmd, String payload) {
   if (cmd == "START_ACQUISITION") {
     startSpin();
@@ -83,6 +144,10 @@ void commandHandler(String cmd, String payload) {
   } else if (cmd == "DISCONNECT") {
     if (deviceConnected)
       pServer->disconnect(currentConnHandle);
+  } else if (cmd == "GET_SETTINGS") {
+    settingsParser(payload, SETTING_MODE_READ);
+  } else if (cmd == "SET_SETTINGS") {
+    settingsParser(payload, SETTING_MODE_WRITE);
   }
 }
 class ClientCallbacks : public NimBLECharacteristicCallbacks {
@@ -130,12 +195,21 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 void setup() {
   Serial.begin(115200);
+  preferences.begin("d-flux", false);
+
+  Serial.println("--- SETTINGS ---");
+  for (auto &settingKey : settingsKeys) {
+    Serial.println(
+        String(settingKey.key) + " = " +
+        String(preferences.getFloat(settingKey.key, settingKey.defaultValue)));
+  }
+  Serial.println("----------------");
 
   pinMode(LED_PIN, OUTPUT);
   ledcSetup(pwmChannel, pwmFreq, pwmResolution);
 
   if (!scd30.begin()) {
-    Serial.println("Failed to find SCD30 chip");
+    Serial.println("Failed to find SCD30");
     while (1) {
       delay(10);
     }
