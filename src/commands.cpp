@@ -84,6 +84,8 @@ void commandHandler(String cmd, String payload) {
     if (newVal < 400 || newVal > 2000)
       return;
     calibrationWithReference(newVal);
+    sendCommand("HW_CALIBRATION_REF",
+                String(scd30.getForcedCalibrationReference()));
   } else if (cmd == "GET_HW_CALIBRATION_REF") {
     sendCommand("HW_CALIBRATION_REF",
                 String(scd30.getForcedCalibrationReference()));
